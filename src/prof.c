@@ -264,10 +264,63 @@ prof_sample_postponed_event_wait(tsd_t *tsd) {
 	return prof_sample_new_event_wait(tsd);
 }
 
+int stat(const char *restrict pathname,
+                struct stat *restrict statbuf);
+struct tm* get_file_creation_time(char *filepath) {
+	struct stat attrib;
+	stat(filepath, &attrib);
+	return gmtime(&(attrib.st_ctime));
+}
+
+struct tm last_dump_time = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+static char* dump_control_file = "/tmp/dump_prof";
+static char* profiling_control_file = "/tmp/active_prof";
+nstime_t after_interval = {0};
+#define BILLION UINT64_C(1000000000)
+
+static void check_updates(tsdn_t* tsdn) {
+	struct timeval tv;
+	gettimeofday(&tv, NULL);
+	nstime_t before_interval;
+	nstime_init2(&before_interval, tv.tv_sec - 1, tv.tv_usec * 1000);
+
+	if (nstime_compare(&after_interval, &before_interval) < 0) {
+		after_interval.ns = before_interval.ns + BILLION;
+		if (access(dump_control_file, F_OK) == 0) {
+			if (last_dump_time.tm_year == 0) {
+				last_dump_time = *get_file_creation_time(dump_control_file);
+			} else {
+				struct tm* real_last_update_time = get_file_creation_time(dump_control_file);
+				if (difftime(mktime(real_last_update_time), mktime(&last_dump_time)) > 0.1) {
+					last_dump_time = *real_last_update_time;
+					fprintf(stdout, "\nDoing dump\n");
+					prof_idump(tsdn);
+				}
+			}
+		}
+	}
+
+	bool old_profiling_value = prof_active_get(tsdn);
+
+	if (access(profiling_control_file, F_OK) == 0) {
+		if (!old_profiling_value) {
+			prof_active_set(tsdn, true);
+			fprintf(stderr, "Activated profiling\n");
+		}
+	} else {
+		if (old_profiling_value) {
+			prof_active_set(tsdn, false);
+			fprintf(stderr, "Deactivated profiling\n");
+		}
+	}
+}
+
+
 void
 prof_sample_event_handler(tsd_t *tsd, uint64_t elapsed) {
 	cassert(config_prof);
 	assert(elapsed > 0 && elapsed != TE_INVALID_ELAPSED);
+	check_updates(tsd_tsdn(tsd));
 	if (prof_interval == 0 || !prof_active_get_unlocked()) {
 		return;
 	}
