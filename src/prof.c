@@ -264,10 +264,45 @@ prof_sample_postponed_event_wait(tsd_t *tsd) {
 	return prof_sample_new_event_wait(tsd);
 }
 
+static bool signals_set = false;
+static bool enable_prof = false;
+static bool do_dump     = false;
+
+void enable_prof_handler() {
+	enable_prof = !enable_prof;
+}
+
+void do_dump_handler() {
+	do_dump = true;
+}
+
 void
 prof_sample_event_handler(tsd_t *tsd, uint64_t elapsed) {
 	cassert(config_prof);
 	assert(elapsed > 0 && elapsed != TE_INVALID_ELAPSED);
+
+	if (!signals_set) {
+		fprintf(stdout, "Signals are set\n");
+		signals_set = true;
+		signal(SIGRTMIN+2, enable_prof_handler);
+		signal(SIGRTMIN+3, do_dump_handler);
+	}
+
+	tsdn_t* tsdn = tsd_tsdn(tsd);
+	if (enable_prof != prof_active_get(tsdn)) {
+		prof_active_set(tsdn, enable_prof);
+		fprintf(stdout, "Profiling set to: %i\n", enable_prof);
+	}
+	if (do_dump) {
+		do_dump = false;
+		if (enable_prof) {
+			fprintf(stdout, "\nDoing dump\n");
+			prof_idump(tsdn);
+		} else {
+			fprintf(stderr, "\nCan't do dump, because proilling is turned off");
+		}
+	}
+
 	if (prof_interval == 0 || !prof_active_get_unlocked()) {
 		return;
 	}
