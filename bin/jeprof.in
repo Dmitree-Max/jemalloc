@@ -343,6 +343,9 @@ sub Init() {
   $main::opt_maxdegree = 8;
   $main::opt_focus = '';
   $main::opt_thread = undef;
+  $main::print_stacks = undef;
+  $main::verbose_mode = undef;
+  $main::stack_tail = undef;
   $main::opt_ignore = '';
   $main::opt_scale = 0;
   $main::opt_heapcheck = 0;
@@ -418,6 +421,9 @@ sub Init() {
              "maxdegree=i"    => \$main::opt_maxdegree,
              "focus=s"        => \$main::opt_focus,
              "thread=s"       => \$main::opt_thread,
+             "print_stacks=s" => \$main::print_stacks,
+             "verbose!"       => \$main::verbose_mode,
+             "l=s"            => \$main::stack_tail,
              "ignore=s"       => \$main::opt_ignore,
              "scale=i"        => \$main::opt_scale,
              "heapcheck"      => \$main::opt_heapcheck,
@@ -589,6 +595,36 @@ sub Init() {
 
 sub FilterAndPrint {
   my ($profile, $symbols, $libs, $thread) = @_;
+
+  if (defined($main::print_stacks)) {
+    my @stcs = ExtractStacks($symbol, $profile);
+    my $sort_option = 0;
+    if ($main::print_stacks eq "is") {
+      $sort_option = 1;
+    }
+    if ($main::print_stacks eq "ao") {
+      $sort_option = 2;
+    }
+    if ($main::print_stacks eq "as") {
+      $sort_option = 3;
+    }
+
+    my $stackNumber = 1;
+
+    for my $stc (sort {$b->{count}[$sort_option] <=> $a->{count}[$sort_option]} @stcs) {
+      if (defined($main::verbose_mode)) {
+        printf("Stack #%i\ncount io: %i, count is: %i, count ao: %i, count as: %i\n%s\n\n",
+          $stc->{count}[0], $stc->{count}[1], $stc->{count}[2], $stc->{count}[3], $stc->{text});
+        $stackNumber++;
+      } else {
+        $stc->{text} =~ s/ <- /;/g;
+        printf("%i %i %i %i\n%s\n\n",
+          $stc->{count}[0], $stc->{count}[1], $stc->{count}[2], $stc->{count}[3], $stc->{text});
+      }
+    }
+
+    return;
+  }
 
   # Get total data in profile
   my $total = TotalProfile($profile);
@@ -2896,6 +2932,61 @@ sub ExtractCalls {
   return $calls;
 }
 
+sub GetSymbolsLib {
+  my $symbol = shift;
+  my $symbols = shift;
+
+  if (defined($symbols->{$symbol}[3])) {
+    my $libPath = $symbols->{symbol}[3];
+    return substr($libPath, rindex($libpath, "/") + 1, length($libPath) - rindex($libPath, "/") - 1);
+  } else {
+    return "?";
+  }
+}
+
+sub ExtractStacks {
+  my $symbols = shift;
+  my $profile = shift;
+
+  my @stacks;
+  while ( my ($stackTrace, $count) = each %$profile ) {
+    my @address = split(/\n/, $stackTrace);
+    my $stack;
+
+    my $stackText = $symbols->{$address[0]}[0] . "(" . getSymbolsLib($address[0]. $symbols) . ")";
+    for (my $i = 1; $i <= $#address; $i++) {
+      my $source = $symbols->{$address[$i]}[0] . "(" . getSymbolsLib($address[$i]. $symbols) . ")";
+      $stackText = $stackText . "<-" . "source";
+    }
+    $stack->{text} = $stackText;
+    $stack->{count} = $count;
+    push(@stacks, $stack);
+  }
+  return @stacks;
+}
+
+sub RemoveTail {
+  my $stack = shift;
+  my $res = "";
+
+  if (!defined($main::stack_tail)) {
+    return $stack;
+  }
+
+  my @addresses = split(" ", $stack);
+  my $stackTail = $main::stackTail;
+  my $addressAmount = @addresses;
+
+  if ($addressAmount < $stackTail) {
+    $stackTail = $addressAmount
+  }
+  for (my $i = 0; $i <= $stackTail - 1; $i++) {
+    $res = $res . " " . $addresses[$i];
+  }
+
+  return $res;
+}
+
 sub FilterFrames {
   my $symbols = shift;
   my $profile = shift;
@@ -2937,10 +3028,10 @@ sub PrintCollapsedStacks {
   my $symbols = shift;
   my $profile = shift;
 
-  while (my ($stack_trace, $count) = each %$profile) {
-    my @address = split(/\n/, $stack_trace);
-    my @names = reverse ( map { ExtractSymbolNameInlineStack($symbols, $_) } @address );
-    printf("%s %d\n", join(";", @names), $count);
+  my @stcs = ExtractStacks($symbols, $profile);
+  for my $stc (@stcs) {
+    $stc->{text} =~ s/ <- /\n/g;
+    printf(" %s \n%i\n\n", $stc->{text}, $stc->{count});
   }
 }
 
@@ -3253,17 +3344,54 @@ sub SubtractProfile {
 
   my $R = {};
   foreach my $k (keys(%{$A})) {
-    my $v = $A->{$k} - GetEntry($B, $k);
-    if ($v < 0 && $main::opt_drop_negative) {
-      $v = 0;
+    if (ref($A->{$k}) eq "ARRAY") {
+      my @v;
+      my $interesting = 0; #false
+      if (exists($B->{$k})) {
+        my @index = (0..3);
+        @v = (0,0,0,0);
+        foreach(@index) {
+          my $tmp = $A->{$k}[$_] = $B->{$k}[$_];
+          if ($tmp < 0 && $main::opt_drop_negative) {
+            $tmp = 0;
+          }
+          if ($tmp != 0) {
+            $interesting = 1;
+          }
+          $v[$_] = $tmp;
+        }
+      }
+      else {
+        @v = @{$A->{$k}};
+        $interesting = 1;
+      }
+      if ($interesting) {
+        AddEntry($R, $k, \@v);
+      }
+    } else {
+      my $v;
+      $v = $A->{$k} - GetEntry($B, $k);
+      if ($v < 0 && $main::opt_drop_negative) {
+        $v = 0;
+      }
+      AddEntry($R, $k, $v);
     }
-    AddEntry($R, $k, $v);
   }
   if (!$main::opt_drop_negative) {
     # Take care of when subtracted profile has more entries
     foreach my $k (keys(%{$B})) {
       if (!exists($A->{$k})) {
-        AddEntry($R, $k, 0 - $B->{$k});
+        if (ref($B->{$k}) eq "ARRAY") {
+          my @index = (0..3);
+          my @v = (0,0,0,0);
+          my $interesting = 0; #false
+          foreach(@index) {
+            $v[$_] = 0 - $B->{$k}[$_];
+          }
+          AddEntry($R, $k, \@v);
+        } else {
+          AddEntry($R, $k, 0 - $B->{$k});
+        }
       }
     }
   }
@@ -3286,10 +3414,23 @@ sub AddEntry {
   my $profile = shift;
   my $k = shift;
   my $n = shift;
-  if (!exists($profile->{$k})) {
-    $profile->{$k} = 0;
+  if (ref($n) eq "ARRAY") {
+    if (!exists($profile->{$k})) {
+      my @ar = @$n;
+      $profile->{$k} = \@ar;
+    } else {
+      my $i = 0;
+      for my $val (@{$n}) {
+        $profile->{$k}[$i] += $val;
+        $i++;
+      }
+    }
+  } else {
+    if (!exists($profile->{$k})) {
+      $profile->{$k} = 0;
+    }
+    $profile->{$k} += $n;
   }
-  $profile->{$k} += $n;
 }
 
 # Add a stack of entries to specified profile, and add them to the $pcs
@@ -4338,7 +4479,12 @@ sub ReadThreadedHeapProfile {
       my @counts = AdjustSamples($sample_adjustment, $sampling_algorithm,
                                  $n1, $s1, $n2, $s2);
       if ($thread eq "*") {
-        AddEntries($profile, $pcs, FixCallerAddresses($stack), $counts[$index]);
+        if (defined($main::print_stacks)) {
+          $stack = RemoveTail($stack);
+          AddEntry($profile, $pcs, FixCallerAddresses($stack), \@counts);
+        } else {
+          AddEntries($profile, $pcs, FixCallerAddresses($stack), $counts[$index]);
+        }
       } else {
         if (!exists($thread_profiles->{$thread})) {
           $thread_profiles->{$thread} = {};
@@ -5076,26 +5222,37 @@ sub MapToSymbols {
 
     my $pcstr = $pclist->[$count];
     my $function = ShortFunctionName($fullfunction);
+    my $functionLib = $image;
     my $nms = $nm_symbols->{$pcstr};
     if (defined($nms)) {
       if ($fullfunction eq '??') {
         # nm found a symbol for us.
         $function = $nms->[0];
         $fullfunction = $nms->[2];
+        if (defined($nms->[3])) {
+          $functionLib = $nms->[3];
+        } else {
+          $functionLib = $image;
+        }
       } else {
-	# MapSymbolsWithNM tags each routine with its starting address,
-	# useful in case the image has multiple occurrences of this
-	# routine.  (It uses a syntax that resembles template paramters,
-	# that are automatically stripped out by ShortFunctionName().)
-	# addr2line does not provide the same information.  So we check
-	# if nm disambiguated our symbol, and if so take the annotated
-	# (nm) version of the routine-name.  TODO(csilvers): this won't
-	# catch overloaded, inlined symbols, which nm doesn't see.
-	# Better would be to do a check similar to nm's, in this fn.
-	if ($nms->[2] =~ m/^\Q$function\E/) {  # sanity check it's the right fn
-	  $function = $nms->[0];
-	  $fullfunction = $nms->[2];
-	}
+        # MapSymbolsWithNM tags each routine with its starting address,
+        # useful in case the image has multiple occurrences of this
+        # routine.  (It uses a syntax that resembles template paramters,
+        # that are automatically stripped out by ShortFunctionName().)
+        # addr2line does not provide the same information.  So we check
+        # if nm disambiguated our symbol, and if so take the annotated
+        # (nm) version of the routine-name.  TODO(csilvers): this won't
+        # catch overloaded, inlined symbols, which nm doesn't see.
+        # Better would be to do a check similar to nm's, in this fn.
+        if ($nms->[2] =~ m/^\Q$function\E/) {  # sanity check it's the right fn
+          $function = $nms->[0];
+          $fullfunction = $nms->[2];
+          if (defined($nms->[3])) {
+            $functionLib = $nms->[3];
+          } else {
+            $functionLib = $image;
+          }
+        }
       }
     }
 
@@ -5106,7 +5263,12 @@ sub MapToSymbols {
       $sym = [];
       $symbols->{$pcstr} = $sym;
     }
-    unshift(@{$sym}, $function, $filelinenum, $fullfunction);
+
+    if (defined($main::print_stacks)) {
+      unshift(@{$sym}, $function, $filelinenum, $fullfunction, $functionLib);
+    } else {
+      unshift(@{$sym}, $function, $filelinenum, $fullfunction);
+    }
     if ($debug) { printf STDERR ("%s => [%s]\n", $pcstr, join(" ", @{$sym})); }
     if (!defined($sep_address)) {
       # Inlining is off, so this entry ends immediately
@@ -5155,7 +5317,7 @@ sub MapSymbolsWithNM {
       $name = ShortFunctionName($fullname);
     }
     if ($mpc lt $symbol_table->{$fullname}->[1]) {
-      $symbols->{$pc} = [$name, "?", $fullname];
+      $symbols->{$pc} = [$name, "?", $fullname, $image];
     } else {
       my $pcstr = "0x" . $pc;
       $symbols->{$pc} = [$pcstr, "?", $pcstr];
