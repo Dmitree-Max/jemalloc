@@ -597,7 +597,7 @@ sub FilterAndPrint {
   my ($profile, $symbols, $libs, $thread) = @_;
 
   if (defined($main::print_stacks)) {
-    my @stcs = ExtractStacks($symbol, $profile);
+    my @stcs = ExtractStacks($symbols, $profile);
     my $sort_option = 0;
     if ($main::print_stacks eq "is") {
       $sort_option = 1;
@@ -614,7 +614,7 @@ sub FilterAndPrint {
     for my $stc (sort {$b->{count}[$sort_option] <=> $a->{count}[$sort_option]} @stcs) {
       if (defined($main::verbose_mode)) {
         printf("Stack #%i\ncount io: %i, count is: %i, count ao: %i, count as: %i\n%s\n\n",
-          $stc->{count}[0], $stc->{count}[1], $stc->{count}[2], $stc->{count}[3], $stc->{text});
+        $stackNumber, $stc->{count}[0], $stc->{count}[1], $stc->{count}[2], $stc->{count}[3], $stc->{text});
         $stackNumber++;
       } else {
         $stc->{text} =~ s/ <- /;/g;
@@ -2938,7 +2938,7 @@ sub GetSymbolsLib {
 
   if (defined($symbols->{$symbol}[3])) {
     my $libPath = $symbols->{symbol}[3];
-    return substr($libPath, rindex($libpath, "/") + 1, length($libPath) - rindex($libPath, "/") - 1);
+    return substr($libPath, rindex($libPath, "/") + 1, length($libPath) - rindex($libPath, "/") - 1);
   } else {
     return "?";
   }
@@ -2953,10 +2953,10 @@ sub ExtractStacks {
     my @address = split(/\n/, $stackTrace);
     my $stack;
 
-    my $stackText = $symbols->{$address[0]}[0] . "(" . getSymbolsLib($address[0]. $symbols) . ")";
-    for (my $i = 1; $i <= $#address; $i++) {
-      my $source = $symbols->{$address[$i]}[0] . "(" . getSymbolsLib($address[$i]. $symbols) . ")";
-      $stackText = $stackText . "<-" . "source";
+    my $stackText = $symbols->{$address[0]}[0] . "(" . GetSymbolsLib($address[0]. $symbols) . ")";
+    for (my $i = 1; $i < $#address + 2; $i++) {
+      my $source = $symbols->{$address[$i]}[0] . "(" . GetSymbolsLib($address[$i]. $symbols) . ")";
+      $stackText = $stackText . "<-" . $source;
     }
     $stack->{text} = $stackText;
     $stack->{count} = $count;
@@ -2974,13 +2974,13 @@ sub RemoveTail {
   }
 
   my @addresses = split(" ", $stack);
-  my $stackTail = $main::stackTail;
+  my $stackTail = $main::stack_tail;
   my $addressAmount = @addresses;
 
   if ($addressAmount < $stackTail) {
     $stackTail = $addressAmount
   }
-  for (my $i = 0; $i <= $stackTail - 1; $i++) {
+  for (my $i = 0; $i < $stackTail; $i++) {
     $res = $res . " " . $addresses[$i];
   }
 
@@ -4481,7 +4481,7 @@ sub ReadThreadedHeapProfile {
       if ($thread eq "*") {
         if (defined($main::print_stacks)) {
           $stack = RemoveTail($stack);
-          AddEntry($profile, $pcs, FixCallerAddresses($stack), \@counts);
+          AddEntries($profile, $pcs, FixCallerAddresses($stack), \@counts);
         } else {
           AddEntries($profile, $pcs, FixCallerAddresses($stack), $counts[$index]);
         }
